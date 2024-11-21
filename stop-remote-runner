@@ -7,7 +7,7 @@
 #       host after being called by the cron script.
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   22:40, 20 Nov 2024
+#   Last Revised:   23:42, 20 Nov 2024
 #
 
 my_user=$(whoami)
@@ -22,7 +22,10 @@ done
 
 if [[ -n $cmd_pid ]]; then
     kill -s INT $cmd_pid
-    wait $runner_pid
+
+    while kill -0 $runner_pid 2> /dev/null; do
+        sleep 1
+    done
 else
     exit 1
 fi

@@ -3,7 +3,7 @@
 #   cron-hpc-runner
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   22:56, 20 Nov 2024
+#   Last Revised:   00:02, 21 Nov 2024
 #
 
 function usage {
@@ -27,7 +27,7 @@ running, it will do nothing.
 Example cron:
 
 # Check that the runner is active every 10 minutes
-*/10 * * * * $0 --machine derecho /glade/work/$USER/runners/hpc-runner
+*/10 * * * * $my_path/cron-github-runner --machine derecho /glade/work/$USER/runners/hpc-runner
 
 Alternatively, the script can be called on the command line to either stop or
 resume runner activity. If --stop is used, the runner will be killed if active
@@ -56,33 +56,34 @@ EOF
 }
 
 function log_message {
-    msg_time=$(date +%Y%m%dT%H%M%S)
+    if [[ ! $tty_mode ]]; then
+        msg_time="$(date +%Y%m%dT%H%M%S) - "
+    fi
 
     if [[ $1 == Error* ]]; then
         log_destination=${log_file:-/dev/stderr}
 
-        if [[ ! -f ${runner_path:-$HOME}/cron-github-runner.error ]]; then
-            create_error_file "$msg_time - $1" ${runner_path:-$HOME}/cron-github-runner.error
+        if [[ $tty_mode == true ]] || [[ ! -f ${runner_path:-$HOME}/cron-github-runner.error ]]; then
+            echo -e "${msg_time}$1" >> $log_destination
 
-            echo -e "$msg_time - $1" >> $log_destination
-            echo -e "\nAn error tracking file was created at ${runner_path:-$HOME}/cron-github-runner.error" >> $log_destination
-            echo "This script will not attempt to start the runner again until the error has been" >> $log_destination
-            echo "remediated and that tracking file has been removed." >> $log_destination
+            if [[ $tty_mode != true ]]; then
+                create_error_file "${msg_time}$1" ${runner_path:-$HOME}/cron-github-runner.error
+
+                echo -e "\nAn error tracking file was created at ${runner_path:-$HOME}/cron-github-runner.error" >> $log_destination
+                echo "This script will not attempt to start the runner again until the error has been" >> $log_destination
+                echo "remediated and that tracking file has been removed." >> $log_destination
+            fi
         fi
 
         exit 1
     else
-        echo -e "$msg_time - $1" >> ${log_file:-/dev/stdin}
+        echo -e "${msg_time}$1" >> ${log_file:-/dev/stdin}
     fi
 }
 
-if [[ $(hostname -s) != cron ]]; then
-    >&2 echo "Error: This script can only be executed from cron.hpc.ucar.edu"
-    exit 1
-fi
-
 my_user=$(whoami)
 my_path="$( cd "$(dirname "$0")" ; pwd )"
+log_date=$(date +%Y%m%d)
 
 # Handle command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -109,17 +110,26 @@ while [[ $# -gt 0 ]]; do
             runner_path=$1
             ;;
     esac
+
+    shift
 done
 
-# Set up logging
-log_date=$(date +%Y%m%dT%H%M%S)
+if [[ $(hostname -s) != cron ]]; then
+    >&2 echo "Error: This script can only be executed from cron.hpc.ucar.edu"
+    exit 1
+fi
 
-if [[ ${mode:=cron} == cron ]]; then
+# If used in cron, log to a file instead of stdout
+if tty -s; then
+    tty_mode=true
+else
     log_path=/glade/derecho/scratch/$my_user/.github_runner_logs
     mkdir -p $log_path
     log_file=$log_path/cron-${log_date}.log
+fi
 
-    # If using cron mode, check that machine is valid
+# If using cron mode, check that machine is valid
+if [[ ${mode:=cron} == cron ]]; then
     case ${runner_machine:=none} in
         derecho)
             dest_domain=derecho.hpc.ucar.edu
@@ -137,7 +147,7 @@ if [[ -z $runner_path ]]; then
     log_message "Error: A path to a valid GitHub runner installation must be given"
 fi
 
-if [[ -f $runner_path/run-helper.sh ]]; then
+if [[ ! -f $runner_path/run-helper.sh ]]; then
     log_message "Error: Github Actions runner scripts not found at $runner_path"
 fi
 
@@ -150,8 +160,14 @@ fi
 if [[ $runner_status == stopped ]]; then
     if [[ $mode == resume ]]; then
         echo "resuming" > $runner_path/cron-runner.status
+        log_message "Removing hold on runner at $runner_path ..."
+    elif [[ $tty_mode == true ]]; then
+        >&2 echo "Runner has been halted. Use --resume to remove hold."
     fi
 
+    exit
+elif [[ $mode == resume ]]; then
+    echo "No hold detected on specified runner. Doing nothing."
     exit
 fi
 
@@ -161,17 +177,17 @@ if [[ ! -f $runner_path/.runner ]]; then
 fi
 
 # Has a runner been started already?
-if [[ $runner_path/cron-runner.pid ]]; then
+if [[ -f $runner_path/cron-runner.pid ]]; then
     runner_pid=$(cat $runner_path/cron-runner.pid)
     runner_host=$(cat $runner_path/cron-runner.host)
 
-    ssh $runner_host "pgrep -u $my_user -x run.sh |& grep -q $runner_pid"
+    ssh -q $runner_host "pgrep -u $my_user -x run.sh |& grep -q $runner_pid"
     runner_alive=$?
 
     if [[ $runner_alive -eq 0 ]]; then
         if [[ $mode == stop ]]; then
             log_message "Killing active runner with pid=$runner_pid on host=$runner_host ..."
-            ssh $runner_host "$my_path/stop-remote-runner $runner_pid"
+            ssh -q $runner_host "$my_path/stop-remote-runner $runner_pid"
             my_status=$?
 
             if [[ $my_status != 0 ]]; then
@@ -194,4 +210,8 @@ if [[ $runner_path/cron-runner.pid ]]; then
 fi
 
 # Either start or restart a runner
-ssh $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
+if [[ $tty_mode == true ]]; then
+    ssh -q $dest_domain "$my_path/start-remote-runner $runner_path tty tty"
+else
+    ssh -q $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
+fi

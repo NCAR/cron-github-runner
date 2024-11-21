@@ -7,7 +7,7 @@
 #       host after being called by the cron script.
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   22:45, 20 Nov 2024
+#   Last Revised:   23:34, 20 Nov 2024
 #
 
 # Handle arguments
@@ -18,7 +18,10 @@ cron_log=$3
 # Introspection
 runner_host=$(hostname -s)
 runner_pid=$$
-runner_log=$log_path/runner-$runner_host-$runner_pid.log
+
+if [[ $log_path != tty ]]; then
+    runner_log=$log_path/runner-$runner_host-$runner_pid.log
+fi
 
 # Runner tracking
 cd $runner_path
@@ -27,6 +30,10 @@ echo $runner_pid > cron-runner.pid
 echo $runner_host > cron-runner.host
 echo "started" > cron-runner.status
 
-echo "$(date +%Y%m%dT%H%M%S) - Starting runner with pid=$runner_pid on host=$runner_host ..." >> $cron_log
-
-exec ./run.sh >& $runner_log
+if [[ -n $runner_log ]]; then
+    echo "$(date +%Y%m%dT%H%M%S) - Starting runner with pid=$runner_pid on host=$runner_host ..." >> $cron_log
+    exec ./run.sh >& $runner_log
+else
+    echo "$(date +%Y%m%dT%H%M%S) - Starting runner with pid=$runner_pid on host=$runner_host ..."
+    exec ./run.sh
+fi
