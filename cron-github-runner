@@ -1,0 +1,197 @@
+#!/bin/bash
+#
+#   cron-hpc-runner
+#
+#   Author:         Brian Vanderwende
+#   Last Revised:   22:56, 20 Nov 2024
+#
+
+function usage {
+cat << EOF
+Usage: $0 --machine MACHINE RUNNERDIR
+       $0 --resume RUNNERDIR
+       $0 --stop RUNNERDIR
+
+This script has three usage modes:
+
+It can be used within a cron job to either start or keep alive a self-hosted HPC
+runner on Derecho or Casper. Before you run this script, you will need to install
+the GitHub Actions self-hosted runner application for Linux and the run the
+"config.sh" script to set up the runner.
+
+Once the runner is configured, add a cron job on cron.hpc.ucar.edu that calls
+this script, providing the desired machine and the path to the configured runner.
+This script will start the runner if it is not already started. If it is already
+running, it will do nothing.
+
+Example cron:
+
+# Check that the runner is active every 10 minutes
+*/10 * * * * $0 --machine derecho /glade/work/$USER/runners/hpc-runner
+
+Alternatively, the script can be called on the command line to either stop or
+resume runner activity. If --stop is used, the runner will be killed if active
+and the cron job will not try to restart it. If --resume is used, this hold on
+the cron job will be released and it will try to restart the runner.
+
+Options:
+    -h, --help              print this help message
+    -m, --machine MACHINE   cron mode; specify derecho or casper for the machine
+    -r, --resume            release hold on cron job and restart runner
+    -s, --stop              kill runner if active and impose hold on cron job
+
+EOF
+}
+
+function create_error_file {
+cat > $2 << EOF
+cron-github-runner failed!
+
+Machine: ${runner_machine:-unknown}
+Path:    ${runner_path:-unknown}
+
+Error message:
+$1
+EOF
+}
+
+function log_message {
+    msg_time=$(date +%Y%m%dT%H%M%S)
+
+    if [[ $1 == Error* ]]; then
+        log_destination=${log_file:-/dev/stderr}
+
+        if [[ ! -f ${runner_path:-$HOME}/cron-github-runner.error ]]; then
+            create_error_file "$msg_time - $1" ${runner_path:-$HOME}/cron-github-runner.error
+
+            echo -e "$msg_time - $1" >> $log_destination
+            echo -e "\nAn error tracking file was created at ${runner_path:-$HOME}/cron-github-runner.error" >> $log_destination
+            echo "This script will not attempt to start the runner again until the error has been" >> $log_destination
+            echo "remediated and that tracking file has been removed." >> $log_destination
+        fi
+
+        exit 1
+    else
+        echo -e "$msg_time - $1" >> ${log_file:-/dev/stdin}
+    fi
+}
+
+if [[ $(hostname -s) != cron ]]; then
+    >&2 echo "Error: This script can only be executed from cron.hpc.ucar.edu"
+    exit 1
+fi
+
+my_user=$(whoami)
+my_path="$( cd "$(dirname "$0")" ; pwd )"
+
+# Handle command-line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            exit
+            ;;
+        -m|--machine)
+            if [[ $1 == *=* ]]; then
+                runner_machine=${1#*=}
+            else
+                runner_machine=$2
+                shift
+            fi
+            ;;
+        -r|--resume)
+            mode=resume
+            ;;
+        -s|--stop)
+            mode=stop
+            ;;
+        *)
+            runner_path=$1
+            ;;
+    esac
+done
+
+# Set up logging
+log_date=$(date +%Y%m%dT%H%M%S)
+
+if [[ ${mode:=cron} == cron ]]; then
+    log_path=/glade/derecho/scratch/$my_user/.github_runner_logs
+    mkdir -p $log_path
+    log_file=$log_path/cron-${log_date}.log
+
+    # If using cron mode, check that machine is valid
+    case ${runner_machine:=none} in
+        derecho)
+            dest_domain=derecho.hpc.ucar.edu
+            ;;
+        casper)
+            dest_domain=casper.hpc.ucar.edu
+            ;;
+        *)
+            log_message "Error: Invalid machine specified ($runner_machine)"
+            ;;
+    esac
+fi
+
+if [[ -z $runner_path ]]; then
+    log_message "Error: A path to a valid GitHub runner installation must be given"
+fi
+
+if [[ -f $runner_path/run-helper.sh ]]; then
+    log_message "Error: Github Actions runner scripts not found at $runner_path"
+fi
+
+# Get runner status, if exists
+if [[ -f $runner_path/cron-runner.status ]]; then
+    runner_status=$(cat $runner_path/cron-runner.status)
+fi
+
+# If the runner has been stopped, don't bother going further
+if [[ $runner_status == stopped ]]; then
+    if [[ $mode == resume ]]; then
+        echo "resuming" > $runner_path/cron-runner.status
+    fi
+
+    exit
+fi
+
+# Now, let's make sure the runner is configured
+if [[ ! -f $runner_path/.runner ]]; then
+    log_message "Error: Runner configuration not found. Run config.sh first to setup runner."
+fi
+
+# Has a runner been started already?
+if [[ $runner_path/cron-runner.pid ]]; then
+    runner_pid=$(cat $runner_path/cron-runner.pid)
+    runner_host=$(cat $runner_path/cron-runner.host)
+
+    ssh $runner_host "pgrep -u $my_user -x run.sh |& grep -q $runner_pid"
+    runner_alive=$?
+
+    if [[ $runner_alive -eq 0 ]]; then
+        if [[ $mode == stop ]]; then
+            log_message "Killing active runner with pid=$runner_pid on host=$runner_host ..."
+            ssh $runner_host "$my_path/stop-remote-runner $runner_pid"
+            my_status=$?
+
+            if [[ $my_status != 0 ]]; then
+                log_message "Error: Could not shut down runner"
+            else
+                echo "stopped" > $runner_path/cron-runner.status
+                rm -f $runner_path/cron-runner.pid $runner_path/cron-runner.host
+            fi
+
+            exit $my_status
+        fi
+
+        log_message "Runner with pid=$runner_pid on host=$runner_host has status=active"
+        exit
+    else
+        log_message "Runner with pid=$runner_pid on host=$runner_host has status=BROKEN"
+        log_message "Restarting runner ..."
+        rm -f $runner_path/cron-runner.pid $runner_path/cron-runner.host
+    fi
+fi
+
+# Either start or restart a runner
+ssh $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"

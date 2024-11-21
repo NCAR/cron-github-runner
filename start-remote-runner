@@ -1,0 +1,32 @@
+#!/bin/bash
+#
+#   start-remote-runner
+#
+#   Description:
+#       This script is intended to start a GitHub actions runner on a remote
+#       host after being called by the cron script.
+#
+#   Author:         Brian Vanderwende
+#   Last Revised:   22:45, 20 Nov 2024
+#
+
+# Handle arguments
+runner_path="$1"
+log_path=$2
+cron_log=$3
+
+# Introspection
+runner_host=$(hostname -s)
+runner_pid=$$
+runner_log=$log_path/runner-$runner_host-$runner_pid.log
+
+# Runner tracking
+cd $runner_path
+
+echo $runner_pid > cron-runner.pid
+echo $runner_host > cron-runner.host
+echo "started" > cron-runner.status
+
+echo "$(date +%Y%m%dT%H%M%S) - Starting runner with pid=$runner_pid on host=$runner_host ..." >> $cron_log
+
+exec ./run.sh >& $runner_log

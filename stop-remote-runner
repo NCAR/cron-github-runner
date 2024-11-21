@@ -1,0 +1,28 @@
+#!/bin/bash
+#
+#   stop-remote-runner
+#
+#   Description:
+#       This script is intended to stop a GitHub actions runner on a remote
+#       host after being called by the cron script.
+#
+#   Author:         Brian Vanderwende
+#   Last Revised:   22:40, 20 Nov 2024
+#
+
+my_user=$(whoami)
+
+# Handle arguments
+runner_pid=$1
+
+# We need to stop Runner.Listener for a clean exit
+while [[ $cmd_name != Runner.Listener ]]; do
+    read cmd_pid cmd_name <<< $(pgrep -u $my_user -l -P ${cmd_pid:-$runner_pid})
+done
+
+if [[ -n $cmd_pid ]]; then
+    kill -s INT $cmd_pid
+    wait $runner_pid
+else
+    exit 1
+fi
