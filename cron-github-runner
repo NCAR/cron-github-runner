@@ -3,14 +3,15 @@
 #   cron-hpc-runner
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   00:02, 21 Nov 2024
+#   Last Revised:   09:06, 21 Nov 2024
 #
 
 function usage {
 cat << EOF
 Usage: $0 --machine MACHINE RUNNERDIR
-       $0 --resume RUNNERDIR
-       $0 --stop RUNNERDIR
+       $0 --info            RUNNERDIR
+       $0 --resume          RUNNERDIR
+       $0 --stop            RUNNERDIR
 
 This script has three usage modes:
 
@@ -26,8 +27,8 @@ running, it will do nothing.
 
 Example cron:
 
-# Check that the runner is active every 10 minutes
-*/10 * * * * $my_path/cron-github-runner --machine derecho /glade/work/$USER/runners/hpc-runner
+# Check that the runner is active every 5 minutes
+*/5 * * * * $my_path/cron-github-runner --machine derecho /glade/work/$USER/runners/hpc-runner
 
 Alternatively, the script can be called on the command line to either stop or
 resume runner activity. If --stop is used, the runner will be killed if active
@@ -36,6 +37,7 @@ the cron job will be released and it will try to restart the runner.
 
 Options:
     -h, --help              print this help message
+    -i, --info              print information about the runner at RUNNERDIR
     -m, --machine MACHINE   cron mode; specify derecho or casper for the machine
     -r, --resume            release hold on cron job and restart runner
     -s, --stop              kill runner if active and impose hold on cron job
@@ -57,7 +59,7 @@ EOF
 
 function log_message {
     if [[ ! $tty_mode ]]; then
-        msg_time="$(date +%Y%m%dT%H%M%S) - "
+        msg_time="$(date -Iseconds) - "
     fi
 
     if [[ $1 == Error* ]]; then
@@ -81,9 +83,32 @@ function log_message {
     fi
 }
 
+function print_runner_info {
+cat << EOF
+Runner Information
+------------------
+Runner path:    $runner_path
+Logging path:   $log_path
+Status:         ${runner_status:-configured}
+EOF
+
+if [[ $runner_status == started ]]; then
+cat << EOF
+
+Runner log:     $log_path/runner-$runner_host-$runner_pid.log
+Host:           $runner_host
+Parent PID:     $runner_pid
+
+Note -  do not manually attempt to kill the parent PID. This will not properly
+        shut down the runner. Instead call this script with the --stop option.
+EOF
+fi
+}
+
 my_user=$(whoami)
 my_path="$( cd "$(dirname "$0")" ; pwd )"
-log_date=$(date +%Y%m%d)
+log_path=/glade/derecho/scratch/$my_user/.github_runner_logs
+mode=cron
 
 # Handle command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -91,6 +116,9 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             exit
+            ;;
+        -i|--info)
+            mode=info
             ;;
         -m|--machine)
             if [[ $1 == *=* ]]; then
@@ -119,17 +147,28 @@ if [[ $(hostname -s) != cron ]]; then
     exit 1
 fi
 
-# If used in cron, log to a file instead of stdout
 if tty -s; then
     tty_mode=true
+
+    # Cron mode not allowed unless we are debugging
+    if [[ $mode == cron ]] && [[ -z $CRON_RUNNER_DEBUG ]]; then
+        >&2 echo "Error: Runner launching mode is only allowed when used with cron"
+        exit 1
+    fi
 else
-    log_path=/glade/derecho/scratch/$my_user/.github_runner_logs
+    # Info mode does not make sense to run in cron
+    if [[ $mode == info ]]; then
+        exit 1
+    fi
+
+    # If used in cron, log to a file instead of stdout
+    log_date=$(date +%Y%m%d)
     mkdir -p $log_path
     log_file=$log_path/cron-${log_date}.log
 fi
 
 # If using cron mode, check that machine is valid
-if [[ ${mode:=cron} == cron ]]; then
+if [[ $mode == cron ]]; then
     case ${runner_machine:=none} in
         derecho)
             dest_domain=derecho.hpc.ucar.edu
@@ -165,7 +204,9 @@ if [[ $runner_status == stopped ]]; then
         >&2 echo "Runner has been halted. Use --resume to remove hold."
     fi
 
-    exit
+    if [[ $mode != info ]]; then
+        exit
+    fi
 elif [[ $mode == resume ]]; then
     echo "No hold detected on specified runner. Doing nothing."
     exit
@@ -184,34 +225,40 @@ if [[ -f $runner_path/cron-runner.pid ]]; then
     ssh -q $runner_host "pgrep -u $my_user -x run.sh |& grep -q $runner_pid"
     runner_alive=$?
 
-    if [[ $runner_alive -eq 0 ]]; then
-        if [[ $mode == stop ]]; then
-            log_message "Killing active runner with pid=$runner_pid on host=$runner_host ..."
-            ssh -q $runner_host "$my_path/stop-remote-runner $runner_pid"
-            my_status=$?
+    if [[ $mode != info ]]; then
+        if [[ $runner_alive -eq 0 ]]; then
+            if [[ $mode == stop ]]; then
+                log_message "Killing active runner with pid=$runner_pid on host=$runner_host ..."
+                ssh -q $runner_host "$my_path/stop-remote-runner $runner_pid"
+                my_status=$?
 
-            if [[ $my_status != 0 ]]; then
-                log_message "Error: Could not shut down runner"
-            else
-                echo "stopped" > $runner_path/cron-runner.status
-                rm -f $runner_path/cron-runner.pid $runner_path/cron-runner.host
+                if [[ $my_status != 0 ]]; then
+                    log_message "Error: Could not shut down runner"
+                else
+                    echo "stopped" > $runner_path/cron-runner.status
+                    rm -f $runner_path/cron-runner.pid $runner_path/cron-runner.host
+                fi
+
+                exit $my_status
             fi
 
-            exit $my_status
+            log_message "Runner with pid=$runner_pid on host=$runner_host has status=active"
+            exit
+        else
+            log_message "Runner with pid=$runner_pid on host=$runner_host has status=BROKEN"
+            log_message "Restarting runner ..."
+            rm -f $runner_path/cron-runner.pid $runner_path/cron-runner.host
         fi
-
-        log_message "Runner with pid=$runner_pid on host=$runner_host has status=active"
-        exit
-    else
-        log_message "Runner with pid=$runner_pid on host=$runner_host has status=BROKEN"
-        log_message "Restarting runner ..."
-        rm -f $runner_path/cron-runner.pid $runner_path/cron-runner.host
     fi
 fi
 
 # Either start or restart a runner
-if [[ $tty_mode == true ]]; then
-    ssh -q $dest_domain "$my_path/start-remote-runner $runner_path tty tty"
+if [[ $mode == info ]]; then
+    print_runner_info
 else
-    ssh -q $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
+    if [[ $tty_mode == true ]]; then
+        ssh -q $dest_domain "$my_path/start-remote-runner $runner_path tty tty"
+    else
+        ssh -q $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
+    fi
 fi

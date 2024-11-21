@@ -7,7 +7,7 @@
 #       host after being called by the cron script.
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   23:34, 20 Nov 2024
+#   Last Revised:   08:36, 21 Nov 2024
 #
 
 # Handle arguments
@@ -31,9 +31,9 @@ echo $runner_host > cron-runner.host
 echo "started" > cron-runner.status
 
 if [[ -n $runner_log ]]; then
-    echo "$(date +%Y%m%dT%H%M%S) - Starting runner with pid=$runner_pid on host=$runner_host ..." >> $cron_log
+    echo "$(date -Iseconds) - Starting runner with pid=$runner_pid on host=$runner_host ..." >> $cron_log
     exec ./run.sh >& $runner_log
 else
-    echo "$(date +%Y%m%dT%H%M%S) - Starting runner with pid=$runner_pid on host=$runner_host ..."
+    echo "$(date -Iseconds) - Starting runner with pid=$runner_pid on host=$runner_host ..."
     exec ./run.sh
 fi
