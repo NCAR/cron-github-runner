@@ -3,7 +3,7 @@
 #   cron-hpc-runner
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   16:56, 21 Nov 2024
+#   Last Revised:   23:31, 21 Nov 2024
 #
 
 function usage {
@@ -230,14 +230,15 @@ if [[ -f $runner_path/cron-runner.pid ]]; then
     runner_pid=$(cat $runner_path/cron-runner.pid)
     runner_host=$(cat $runner_path/cron-runner.host)
 
-    ssh -q $runner_host "pgrep -u $my_user -x run.sh |& grep -q $runner_pid"
+    # Without accept-new, this script can encounter a silent key-prompt block
+    ssh -q -o "StrictHostKeyChecking accept-new" $runner_host "pgrep -u $my_user -x run.sh |& grep -q $runner_pid"
     runner_alive=$?
 
     if [[ $mode != info ]]; then
         if [[ $runner_alive -eq 0 ]]; then
             if [[ $mode == stop ]]; then
                 log_message "Killing active runner with pid=$runner_pid on host=$runner_host ..."
-                ssh -q $runner_host "$my_path/stop-remote-runner $runner_pid"
+                ssh -q -o "StrictHostKeyChecking accept-new" $runner_host "$my_path/stop-remote-runner $runner_pid"
                 my_status=$?
 
                 if [[ $my_status != 0 ]]; then
@@ -265,8 +266,8 @@ if [[ $mode == info ]]; then
     print_runner_info
 else
     if [[ $tty_mode == true ]]; then
-        ssh -q $dest_domain "$my_path/start-remote-runner $runner_path tty tty"
+        ssh -q -o "StrictHostKeyChecking accept-new" $dest_domain "$my_path/start-remote-runner $runner_path tty tty"
     else
-        ssh -q $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
+        ssh -q -o "StrictHostKeyChecking accept-new" $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
     fi
 fi
