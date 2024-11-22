@@ -3,7 +3,7 @@
 #   cron-hpc-runner
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   09:06, 21 Nov 2024
+#   Last Revised:   16:56, 21 Nov 2024
 #
 
 function usage {
@@ -57,27 +57,30 @@ $1
 EOF
 }
 
+function error_tracker_message {
+cat << EOF
+
+An error tracking file was created at ${runner_path:-$HOME}/cron-github-runner.error
+This script will not attempt to start the runner again until the error has been
+remediated and that tracking file has been removed.
+EOF
+}
+
 function log_message {
-    if [[ ! $tty_mode ]]; then
-        msg_time="$(date -Iseconds) - "
-    fi
+    msg_time="$(date -Iseconds) - "
 
     if [[ $1 == Error* ]]; then
-        log_destination=${log_file:-/dev/stderr}
-
-        if [[ $tty_mode == true ]] || [[ ! -f ${runner_path:-$HOME}/cron-github-runner.error ]]; then
-            echo -e "${msg_time}$1" >> $log_destination
-
-            if [[ $tty_mode != true ]]; then
-                create_error_file "${msg_time}$1" ${runner_path:-$HOME}/cron-github-runner.error
-
-                echo -e "\nAn error tracking file was created at ${runner_path:-$HOME}/cron-github-runner.error" >> $log_destination
-                echo "This script will not attempt to start the runner again until the error has been" >> $log_destination
-                echo "remediated and that tracking file has been removed." >> $log_destination
-            fi
+        if [[ $tty_mode == true ]]; then
+            echo -e "$1"
+        elif [[ ! -f ${runner_path:-$HOME}/cron-github-runner.error ]]; then
+            echo -e "${msg_time}$1" >> $log_file
+            create_error_file "${msg_time}$1" ${runner_path:-$HOME}/cron-github-runner.error
+            error_tracker_message >> $log_file
         fi
 
         exit 1
+    elif [[ $tty_mode == true ]]; then
+        echo -e "$1"
     else
         echo -e "${msg_time}$1" >> ${log_file:-/dev/stdin}
     fi
@@ -165,6 +168,11 @@ else
     log_date=$(date +%Y%m%d)
     mkdir -p $log_path
     log_file=$log_path/cron-${log_date}.log
+fi
+
+if [[ ! -d $runner_path ]]; then
+    unset runner_path
+    log_message "Error: Input runner path does not exist"
 fi
 
 # If using cron mode, check that machine is valid
