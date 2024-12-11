@@ -3,15 +3,16 @@
 #   cron-hpc-runner
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   23:31, 21 Nov 2024
+#   Last Revised:   16:42, 11 Dec 2024
 #
 
 function usage {
 cat << EOF
-Usage: $0 --machine MACHINE RUNNERDIR
-       $0 --info            RUNNERDIR
-       $0 --resume          RUNNERDIR
-       $0 --stop            RUNNERDIR
+Usage: $0 --name NAME --machine MACHINE RUNNERDIR
+       $0 --info                        RUNNERDIR|NAME
+       $0 --resume                      RUNNERDIR|NAME
+       $0 --stop                        RUNNERDIR|NAME
+       $0 --list
 
 This script has three usage modes:
 
@@ -28,7 +29,7 @@ running, it will do nothing.
 Example cron:
 
 # Check that the runner is active every 5 minutes
-*/5 * * * * $my_path/cron-github-runner --machine derecho /glade/work/$USER/runners/hpc-runner
+*/5 * * * * $my_root/bin/cron-github-runner -n myrunner -m derecho /glade/work/$USER/runners/hpc-runner
 
 Alternatively, the script can be called on the command line to either stop or
 resume runner activity. If --stop is used, the runner will be killed if active
@@ -38,7 +39,9 @@ the cron job will be released and it will try to restart the runner.
 Options:
     -h, --help              print this help message
     -i, --info              print information about the runner at RUNNERDIR
+    -l, --list              print list of runners started with this utility
     -m, --machine MACHINE   cron mode; specify derecho or casper for the machine
+    -n, --name NAME         when starting a runner: assign it the given name
     -r, --resume            release hold on cron job and restart runner
     -s, --stop              kill runner if active and impose hold on cron job
 
@@ -73,16 +76,16 @@ function log_message {
         if [[ $tty_mode == true ]]; then
             echo -e "$1"
         elif [[ ! -f ${runner_path:-$HOME}/cron-github-runner.error ]]; then
-            echo -e "${msg_time}$1" >> $log_file
+            echo -e "${msg_time}$1" >> $cron_log
             create_error_file "${msg_time}$1" ${runner_path:-$HOME}/cron-github-runner.error
-            error_tracker_message >> $log_file
+            error_tracker_message >> $cron_log
         fi
 
         exit 1
     elif [[ $tty_mode == true ]]; then
         echo -e "$1"
     else
-        echo -e "${msg_time}$1" >> ${log_file:-/dev/stdin}
+        echo -e "${msg_time}$1" >> ${cron_log:-/dev/stdin}
     fi
 }
 
@@ -90,17 +93,25 @@ function print_runner_info {
 cat << EOF
 Runner Information
 ------------------
+Runner name:    $runner_name
 Runner path:    $runner_path
 Logging path:   $log_path
 Status:         ${runner_status:-configured}
 EOF
 
 if [[ $runner_status == started ]]; then
-cat << EOF
+cron_latest=$(ls -1 $log_path/${runner_name}_cron_*.log | tail -1)
+runner_latest=$(ls -1 $log_path/${runner_name}_runner_*.log | tail -1)
 
-Runner log:     $log_path/runner-$runner_host-$runner_pid.log
+cat << EOF
 Host:           $runner_host
 Parent PID:     $runner_pid
+
+Cron log:       $cron_latest
+ >> latest: $(tail -1 $cron_latest)
+
+Runner log:     $runner_latest
+ >> latest: $(tail -1 $runner_latest)
 
 Note -  do not manually attempt to kill the parent PID. This will not properly
         shut down the runner. Instead call this script with the --stop option.
@@ -108,8 +119,35 @@ EOF
 fi
 }
 
+function print_runner_list {
+    list_fmt="%-15s %-10s %-10s %s\n"
+    printf "$list_fmt" Name Status PID Directory
+    echo "---------------------------------------------------------------------"
+
+    if [[ -f $log_path/list ]]; then
+        while read runner_name runner_path; do
+            runner_status=$(cat $runner_path/cron-runner.status 2> /dev/null)
+            runner_pid=$(cat $runner_path/cron-runner.pid 2> /dev/null)
+            printf "$list_fmt" $runner_name ${runner_status:-unknown} "${runner_pid}" $runner_path
+        done < $log_path/list
+    fi
+}
+
+function add_runner_to_list {
+    if ! grep -q "^$runner_name " $log_path/list 2> /dev/null; then
+        echo "$runner_name $runner_path" >> $log_path/list
+    else
+        old_path=$(awk -v rn=$runner_name '$1 == rn { print $2 }' $log_path/list)
+
+        if [[ $old_path != $runner_path ]]; then
+            sed -i "/^$runner_name /d" $log_path/list
+            echo "$runner_name $runner_path" >> $log_path/list
+        fi
+    fi
+}
+
 my_user=$(whoami)
-my_path="$( cd "$(dirname "$0")" ; pwd )"
+my_root="$( cd "$(dirname "$0")"/.. ; pwd )"
 log_path=/glade/derecho/scratch/$my_user/.github_runner_logs
 mode=cron
 
@@ -119,6 +157,9 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             exit
+            ;;
+        -l|--list)
+            mode=list
             ;;
         -i|--info)
             mode=info
@@ -131,14 +172,34 @@ while [[ $# -gt 0 ]]; do
                 shift
             fi
             ;;
+        -n|--name)
+            if [[ $1 == *=* ]]; then
+                runner_name=${1#*=}
+            else
+                runner_name=$2
+                shift
+            fi
+
+            if [[ -z $runner_path ]]; then
+                runner_path=$(awk -v rn=$runner_name '$1 == rn { print $2 }' $log_path/list 2> /dev/null)
+            fi
+            ;;
         -r|--resume)
             mode=resume
             ;;
         -s|--stop)
             mode=stop
             ;;
-        *)
+        /*)
             runner_path=$1
+
+            if [[ -z $runner_name ]]; then
+                runner_name=$(awk -v rp=$1 '$2 == rp { print $1 }' $log_path/list 2> /dev/null)
+            fi
+            ;;
+        *)
+            >& echo "Error: Input path is not valid ($1)"
+            exit 1
             ;;
     esac
 
@@ -159,15 +220,24 @@ if tty -s; then
         exit 1
     fi
 else
-    # Info mode does not make sense to run in cron
-    if [[ $mode == info ]]; then
+    # Info modes does not make sense to run in cron
+    if [[ $mode =~ (info|list) ]]; then
         exit 1
     fi
 
     # If used in cron, log to a file instead of stdout
     log_date=$(date +%Y%m%d)
     mkdir -p $log_path
-    log_file=$log_path/cron-${log_date}.log
+    cron_log=$log_path/${runner_name:-unknown}_cron_${log_date}.log
+fi
+
+if [[ $mode == list ]]; then
+    print_runner_list
+    exit
+fi
+
+if [[ -z $runner_path ]]; then
+    log_message "Error: Runner path not provided or found in registry"
 fi
 
 if [[ ! -d $runner_path ]]; then
@@ -190,12 +260,12 @@ if [[ $mode == cron ]]; then
     esac
 fi
 
-if [[ -z $runner_path ]]; then
-    log_message "Error: A path to a valid GitHub runner installation must be given"
-fi
-
 if [[ ! -f $runner_path/run-helper.sh ]]; then
     log_message "Error: Github Actions runner scripts not found at $runner_path"
+fi
+
+if [[ -z $runner_name ]]; then
+    log_message "Error: Runner name not provided or found in registry"
 fi
 
 # Get runner status, if exists
@@ -209,7 +279,7 @@ if [[ $runner_status == stopped ]]; then
         echo "resuming" > $runner_path/cron-runner.status
         log_message "Removing hold on runner at $runner_path ..."
     elif [[ $tty_mode == true ]]; then
-        >&2 echo "Runner has been halted. Use --resume to remove hold."
+        >&2 echo -e "Note: Runner has been halted. Use --resume to remove hold.\n"
     fi
 
     if [[ $mode != info ]]; then
@@ -235,10 +305,12 @@ if [[ -f $runner_path/cron-runner.pid ]]; then
     runner_alive=$?
 
     if [[ $mode != info ]]; then
+        add_runner_to_list
+
         if [[ $runner_alive -eq 0 ]]; then
             if [[ $mode == stop ]]; then
                 log_message "Killing active runner with pid=$runner_pid on host=$runner_host ..."
-                ssh -q -o "StrictHostKeyChecking accept-new" $runner_host "$my_path/stop-remote-runner $runner_pid"
+                ssh -q -o "StrictHostKeyChecking accept-new" $runner_host "$my_root/etc/stop-remote-runner $runner_pid"
                 my_status=$?
 
                 if [[ $my_status != 0 ]]; then
@@ -265,9 +337,15 @@ fi
 if [[ $mode == info ]]; then
     print_runner_info
 else
+    add_runner_to_list
+
+    # Create convenient symlink to runner directory
+    rm -f $log_path/$runner_name
+    ln -s $runner_path $log_path/$runner_name
+
     if [[ $tty_mode == true ]]; then
-        ssh -q -o "StrictHostKeyChecking accept-new" $dest_domain "$my_path/start-remote-runner $runner_path tty tty"
+        ssh -q -o "StrictHostKeyChecking accept-new" $dest_domain "$my_root/etc/start-remote-runner $runner_path tty"
     else
-        ssh -q -o "StrictHostKeyChecking accept-new" $dest_domain "$my_path/start-remote-runner $runner_path $log_path $log_file"
+        ssh -q -o "StrictHostKeyChecking accept-new" $dest_domain "$my_root/etc/start-remote-runner $runner_path $cron_log"
     fi
 fi

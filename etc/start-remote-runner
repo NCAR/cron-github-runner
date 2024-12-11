@@ -7,20 +7,19 @@
 #       host after being called by the cron script.
 #
 #   Author:         Brian Vanderwende
-#   Last Revised:   08:36, 21 Nov 2024
+#   Last Revised:   20:55, 04 Dec 2024
 #
 
 # Handle arguments
 runner_path="$1"
-log_path=$2
-cron_log=$3
+cron_log=$2
 
 # Introspection
 runner_host=$(hostname -s)
 runner_pid=$$
 
-if [[ $log_path != tty ]]; then
-    runner_log=$log_path/runner-$runner_host-$runner_pid.log
+if [[ $cron_log != tty ]]; then
+    runner_log=${cron_log/_cron_/_runner_}
 fi
 
 # Runner tracking
